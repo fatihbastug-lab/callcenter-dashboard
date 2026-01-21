@@ -2,124 +2,149 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-st.set_page_config(page_title="Callcenter BI Dashboard", layout="wide")
-st.title("📊 Callcenter BI Dashboard (Excel / Power BI Mantığı)")
-st.info("3 Excel dosyasını yükleyin. BI ekranında hangi dosya/sheet 'ana tablo' olacak seçebilirsin (Power BI gibi).")
+st.set_page_config(page_title="Universal BI (Power BI Mantığı)", layout="wide")
+st.title("📊 Universal BI Dashboard (Power BI Mantığı)")
+st.info("İstediğin Excel dosyalarını yükle. Uygulama kolonları tanıyıp slicer + matrix + grafik üretir.")
 
-# ---------------- Upload ----------------
-c1, c2, c3 = st.columns(3)
-with c1:
-    mma_file = st.file_uploader("📂 MMA Excel", type=["xlsx"], key="mma")
-with c2:
-    ham_file = st.file_uploader("📂 HAM VERİ Excel", type=["xlsx"], key="ham")
-with c3:
-    sikayet_file = st.file_uploader("📂 ŞİKAYET Excel", type=["xlsx"], key="sikayet")
+# ---------- Helpers ----------
+def norm(s: str) -> str:
+    return (str(s).strip().lower()
+            .replace(" ", "").replace("_", "").replace("-", "")
+            .replace("ı","i").replace("ş","s").replace("ğ","g")
+            .replace("ö","o").replace("ü","u").replace("ç","c"))
 
-@st.cache_data
-def load_excels(mma_file, ham_file, sikayet_file):
-    mma = pd.read_excel(mma_file, sheet_name=None)
-    ham = pd.read_excel(ham_file, sheet_name=None)
-    sikayet = pd.read_excel(sikayet_file, sheet_name=None)
-    return {"MMA": mma, "HAM_VERI": ham, "SIKAYET": sikayet}
+def find_col(df: pd.DataFrame, candidates: list[str]):
+    cols = list(df.columns)
+    for c in candidates:
+        if c in cols:
+            return c
+    nmap = {norm(c): c for c in cols}
+    for cand in candidates:
+        k = norm(cand)
+        if k in nmap:
+            return nmap[k]
+    return None
 
-def to_datetime_safe(df: pd.DataFrame, col: str):
+def safe_to_datetime(df, col):
     if col and col in df.columns:
         df[col] = pd.to_datetime(df[col], errors="coerce")
     return df
 
-def to_numeric_safe(df: pd.DataFrame, col: str):
+def safe_to_numeric(df, col):
     if col and col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
-if not (mma_file and ham_file and sikayet_file):
-    st.warning("Devam etmek için 3 dosyayı da yükleyin.")
+@st.cache_data
+def read_excel_all_sheets(uploaded_file):
+    # sheet_name=None => tüm sheet'ler dict
+    return pd.read_excel(uploaded_file, sheet_name=None)
+
+# ---------- Upload multiple files ----------
+files = st.file_uploader("📂 Excel dosyaları (birden fazla seçebilirsin)", type=["xlsx"], accept_multiple_files=True)
+
+if not files:
+    st.warning("Devam etmek için en az 1 Excel yükle.")
     st.stop()
 
-data = load_excels(mma_file, ham_file, sikayet_file)
-st.success("Dosyalar yüklendi ✅")
+# Read all
+all_books = {}
+for f in files:
+    all_books[f.name] = read_excel_all_sheets(f)
 
-tabBI, tabDATA = st.tabs(["📌 BI Dashboard (Power BI Mantığı)", "📄 Ham Veri (Sheet Görüntüle)"])
+tabBI, tabDATA = st.tabs(["📌 BI Dashboard", "📄 Veri Görüntüle"])
 
-# ---------------- Ham Veri Görüntüleme ----------------
+# ---------- Tab: Data viewer ----------
 with tabDATA:
-    st.subheader("Ham Veri Görüntüleme")
-    ds = st.selectbox("Dosya", list(data.keys()), key="ds_view")
-    sh = st.selectbox("Sheet", list(data[ds].keys()), key="sh_view")
-    st.dataframe(data[ds][sh], use_container_width=True, height=650)
+    st.subheader("Ham Veri (Sheet Görüntüleme)")
+    book_name = st.selectbox("Dosya", list(all_books.keys()))
+    sheet_name = st.selectbox("Sheet", list(all_books[book_name].keys()))
+    st.dataframe(all_books[book_name][sheet_name], use_container_width=True, height=650)
 
-# ---------------- BI Dashboard ----------------
+# ---------- Tab: BI ----------
 with tabBI:
-    st.subheader("Power BI / Pivot Mantığı (Fact Tablo Seçimi)")
+    st.subheader("Power BI Mantığı: Fact Seç → Kolon Eşleştir → Slicer + Matrix")
 
-    # 1) Fact tablo seç (sen HAM_VERI seçeceksin)
-    ds_fact = st.selectbox("Ana Veri (Fact) hangi dosyada?", list(data.keys()), index=list(data.keys()).index("HAM_VERI") if "HAM_VERI" in data else 0)
-    sh_fact = st.selectbox("Fact sheet", list(data[ds_fact].keys()))
-    fact = data[ds_fact][sh_fact].copy()
+    # 1) Fact selection
+    book_name = st.selectbox("Ana tablo (Fact) hangi dosyada?", list(all_books.keys()), key="fact_book")
+    sheet_name = st.selectbox("Fact sheet", list(all_books[book_name].keys()), key="fact_sheet")
+    fact = all_books[book_name][sheet_name].copy()
 
-    st.caption(f"📌 Fact kaynak: **{ds_fact} / {sh_fact}**")
+    st.caption(f"📌 Fact kaynak: **{book_name} / {sheet_name}**")
 
-    # 2) Kolon eşleştirme (Power BI gibi)
-    st.markdown("### 🧷 Kolon Eşleştirme (Zorunlu: Agent + Form Puan)")
     cols = list(fact.columns)
 
-    cc1, cc2, cc3, cc4, cc5 = st.columns(5)
+    # 2) Auto-detect suggestions (Power BI gibi öneri)
+    agent_c = ["Agent", "AGENT", "Müşteri Temsilcisi Adı", "Temsilci", "Asistan", "Kullanıcı", "User", "Personel"]
+    leader_c = ["Takım Lideri", "TAKIM LİDERİ", "Team Leader", "TL", "Lider"]
+    loc_c    = ["Lokasyon", "LOKASYON", "Location", "Şehir", "Sehir", "City", "Bölge", "Bolge"]
+    date_c   = ["Tarih", "Kayıt Tarihi", "Şikayet Tarihi", "Çağrı Tarih Saati", "Çağrı Tarihi", "Date", "Datetime"]
+    score_c  = ["Form Puan", "FORM PUAN", "Puan", "Skor", "Score", "Toplam Puan", "Genel Puan", "Ortalama"]
 
-    with cc1:
-        col_agent = st.selectbox("Agent / Asistan", cols, index=cols.index("Müşteri Temsilcisi Adı") if "Müşteri Temsilcisi Adı" in cols else 0)
+    auto_agent = find_col(fact, agent_c)
+    auto_leader = find_col(fact, leader_c)
+    auto_loc = find_col(fact, loc_c)
+    auto_date = find_col(fact, date_c)
+    auto_score = find_col(fact, score_c)
 
-    with cc2:
-        col_lider = st.selectbox("Takım Lideri (ops.)", ["(YOK)"] + cols, index=0)
+    st.markdown("### 🧷 Kolon Eşleştirme (Power BI Fields gibi)")
+    st.caption("Zorunlu: **Puan/Skor** (ortalama almak için). Diğerleri opsiyonel.")
 
-    with cc3:
-        col_lok = st.selectbox("Lokasyon (ops.)", ["(YOK)"] + cols, index=0)
+    m1, m2, m3, m4, m5 = st.columns(5)
+    with m1:
+        col_score = st.selectbox("Puan/Skor (zorunlu)", cols, index=cols.index(auto_score) if auto_score in cols else 0)
+    with m2:
+        col_agent = st.selectbox("Agent (ops.)", ["(YOK)"] + cols,
+                                 index=(["(YOK)"] + cols).index(auto_agent) if auto_agent in cols else 0)
+    with m3:
+        col_leader = st.selectbox("Takım Lideri (ops.)", ["(YOK)"] + cols,
+                                  index=(["(YOK)"] + cols).index(auto_leader) if auto_leader in cols else 0)
+    with m4:
+        col_loc = st.selectbox("Lokasyon (ops.)", ["(YOK)"] + cols,
+                               index=(["(YOK)"] + cols).index(auto_loc) if auto_loc in cols else 0)
+    with m5:
+        col_date = st.selectbox("Tarih (ops.)", ["(YOK)"] + cols,
+                                index=(["(YOK)"] + cols).index(auto_date) if auto_date in cols else 0)
 
-    with cc4:
-        col_date = st.selectbox("Tarih (ops.)", ["(YOK)"] + cols, index=0)
-
-    with cc5:
-        # Form Puan zorunlu
-        # Eğer listede yoksa user seçer; senin durumda burada olacak
-        col_form = st.selectbox("Form Puan (zorunlu)", cols)
-
-    if col_lider == "(YOK)":
-        col_lider = None
-    if col_lok == "(YOK)":
-        col_lok = None
+    if col_agent == "(YOK)":
+        col_agent = None
+    if col_leader == "(YOK)":
+        col_leader = None
+    if col_loc == "(YOK)":
+        col_loc = None
     if col_date == "(YOK)":
         col_date = None
 
-    # 3) Tip dönüşümleri
-    fact = to_numeric_safe(fact, col_form)
+    # Types
+    fact = safe_to_numeric(fact, col_score)
     if col_date:
-        fact = to_datetime_safe(fact, col_date)
+        fact = safe_to_datetime(fact, col_date)
 
-    # 4) Filtreler (Excel slicer gibi)
-    st.sidebar.header("🔎 Filtreler (Slicer)")
+    # 3) Slicers (only for mapped dims)
+    st.sidebar.header("🔎 Dilimleyiciler (Slicer)")
 
     fdf = fact.copy()
 
-    def multisel(df, col, label):
+    def slicer_multiselect(df, col, label):
         if not col:
             return []
         opts = sorted(df[col].dropna().unique())
         return st.sidebar.multiselect(label, opts)
 
-    # Cascading: Lokasyon -> Lider -> Agent gibi davranır
-    sel_lok = multisel(fdf, col_lok, "Lokasyon") if col_lok else []
-    if sel_lok and col_lok:
-        fdf = fdf[fdf[col_lok].isin(sel_lok)]
+    # Cascading order: loc -> leader -> agent
+    sel_loc = slicer_multiselect(fdf, col_loc, "Lokasyon") if col_loc else []
+    if sel_loc and col_loc:
+        fdf = fdf[fdf[col_loc].isin(sel_loc)]
 
-    sel_lider = multisel(fdf, col_lider, "Takım Lideri") if col_lider else []
-    if sel_lider and col_lider:
-        fdf = fdf[fdf[col_lider].isin(sel_lider)]
+    sel_leader = slicer_multiselect(fdf, col_leader, "Takım Lideri") if col_leader else []
+    if sel_leader and col_leader:
+        fdf = fdf[fdf[col_leader].isin(sel_leader)]
 
-    # Agent filtresi (opsiyonel)
-    sel_agent = multisel(fdf, col_agent, "Agent") if col_agent else []
+    sel_agent = slicer_multiselect(fdf, col_agent, "Agent") if col_agent else []
     if sel_agent and col_agent:
         fdf = fdf[fdf[col_agent].isin(sel_agent)]
 
-    # Tarih filtresi (opsiyonel)
+    # Date slicer
     if col_date and fdf[col_date].notna().any():
         min_d = fdf[col_date].min().date()
         max_d = fdf[col_date].max().date()
@@ -128,38 +153,41 @@ with tabBI:
             sd, ed = dr
             fdf = fdf[(fdf[col_date] >= pd.to_datetime(sd)) & (fdf[col_date] < pd.to_datetime(ed) + pd.Timedelta(days=1))]
 
-    # 5) KPI Kartları (Power BI hissi)
+    # 4) KPI
     st.divider()
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Kayıt Adedi", f"{len(fdf):,}".replace(",", "."))
-    k2.metric("Aktif Agent", f"{fdf[col_agent].nunique():,}".replace(",", "."))
-    k3.metric("Form Puan Ort.", f"{fdf[col_form].mean():.2f}" if fdf[col_form].notna().any() else "—")
-    k4.metric("Form Puan Min/Max", f"{fdf[col_form].min():.2f} / {fdf[col_form].max():.2f}" if fdf[col_form].notna().any() else "—")
+    k2.metric("Skor Ort.", f"{fdf[col_score].mean():.2f}" if fdf[col_score].notna().any() else "—")
+    k3.metric("Skor Min/Max", f"{fdf[col_score].min():.2f} / {fdf[col_score].max():.2f}" if fdf[col_score].notna().any() else "—")
+    k4.metric("Aktif Agent", f"{fdf[col_agent].nunique():,}".replace(",", ".") if col_agent else "—")
 
+    # 5) Matrix / Pivot (Rows + Values)
     st.divider()
+    st.markdown("### 🧩 Matrix (Power BI) – Satırlar / Değerler")
 
-    # 6) Satırlar / Değerler (Pivot / Matrix)
-    st.markdown("### 🧩 Pivot Mantığı (Satırlar / Değerler)")
+    row_dim_map = {"(Seç)": None}
+    if col_agent: row_dim_map["Agent"] = col_agent
+    if col_leader: row_dim_map["Takım Lideri"] = col_leader
+    if col_loc: row_dim_map["Lokasyon"] = col_loc
 
-    row_dim_map = {
-        "Agent": col_agent,
-        "Takım Lideri": col_lider,
-        "Lokasyon": col_lok,
-    }
-    row_dim_map = {k: v for k, v in row_dim_map.items() if v is not None}
+    # Ayrıca kullanıcı isterse fact içindeki başka kolonları da satır yapabilsin
+    extra_cols = st.multiselect("Ek satır kırılımları (ops.)", cols)
+    for ec in extra_cols:
+        row_dim_map[f"Kolon: {ec}"] = ec
 
-    if not row_dim_map:
-        st.error("Satır kırılımı için en az 1 kolon seçmelisin (Agent zaten zorunlu).")
+    row_keys = [k for k,v in row_dim_map.items() if v is not None]
+    if not row_keys:
+        st.warning("Matrix için en az 1 Satır kırılımı seç (Agent/Lokasyon/Lider veya ek kolon).")
         st.stop()
 
-    p1, p2, p3 = st.columns([2, 2, 1])
+    p1, p2, p3 = st.columns([2,2,1])
     with p1:
-        row_dim = st.selectbox("Satırlar (Rows)", list(row_dim_map.keys()), index=0)
+        row_dim = st.selectbox("Satırlar (Rows)", row_keys)
     with p2:
         values = st.multiselect(
             "Değerler (Values)",
-            ["Kayıt Adedi", "Form Puan Ortalama", "Form Puan Min", "Form Puan Max"],
-            default=["Kayıt Adedi", "Form Puan Ortalama"]
+            ["Kayıt Adedi", "Skor Ortalama", "Skor Min", "Skor Max"],
+            default=["Kayıt Adedi", "Skor Ortalama"]
         )
     with p3:
         top_n = st.number_input("Top N", min_value=5, max_value=500, value=50, step=5)
@@ -168,29 +196,28 @@ with tabBI:
 
     agg = {}
     if "Kayıt Adedi" in values:
-        agg["Kayıt Adedi"] = (col_form, "count")
-    if "Form Puan Ortalama" in values:
-        agg["Form Puan Ortalama"] = (col_form, "mean")
-    if "Form Puan Min" in values:
-        agg["Form Puan Min"] = (col_form, "min")
-    if "Form Puan Max" in values:
-        agg["Form Puan Max"] = (col_form, "max")
+        agg["Kayıt Adedi"] = (col_score, "count")
+    if "Skor Ortalama" in values:
+        agg["Skor Ortalama"] = (col_score, "mean")
+    if "Skor Min" in values:
+        agg["Skor Min"] = (col_score, "min")
+    if "Skor Max" in values:
+        agg["Skor Max"] = (col_score, "max")
 
-    pivot = fdf.groupby(row_col, dropna=False).agg(**agg).reset_index()
+    matrix = fdf.groupby(row_col, dropna=False).agg(**agg).reset_index()
+    sort_col = "Skor Ortalama" if "Skor Ortalama" in matrix.columns else matrix.columns[1]
+    matrix = matrix.sort_values(by=sort_col, ascending=False).head(int(top_n))
 
-    sort_col = "Form Puan Ortalama" if "Form Puan Ortalama" in pivot.columns else pivot.columns[1]
-    pivot = pivot.sort_values(by=sort_col, ascending=False).head(int(top_n))
+    st.dataframe(matrix, use_container_width=True, height=520)
 
-    st.dataframe(pivot, use_container_width=True, height=520)
-    csv = pivot.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("⬇️ Pivot çıktısı CSV", csv, "pivot_cikti.csv", "text/csv")
+    csv = matrix.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("⬇️ Matrix CSV indir", csv, "matrix.csv", "text/csv")
 
+    # 6) Chart
     st.divider()
-
-    # 7) Grafik
     st.markdown("### 📈 Grafik")
-    if "Form Puan Ortalama" in pivot.columns:
-        fig = px.bar(pivot, x=row_col, y="Form Puan Ortalama")
+    if "Skor Ortalama" in matrix.columns:
+        fig = px.bar(matrix, x=row_col, y="Skor Ortalama")
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Grafik için 'Form Puan Ortalama' değerini seç.")
+        st.info("Grafik için 'Skor Ortalama' değerini seç.")
